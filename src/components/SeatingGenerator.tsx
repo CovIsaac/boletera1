@@ -4,7 +4,7 @@ import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Grid3x3, Plus } from "lucide-react";
-import { SeatType, SeatingGrid } from "@/types/canvas";
+import { SeatType, SeatingGrid, SeatShape } from "@/types/canvas";
 
 interface SeatingGeneratorProps {
   onGenerate: (grid: SeatingGrid) => void;
@@ -17,15 +17,17 @@ export const SeatingGenerator = ({ onGenerate }: SeatingGeneratorProps) => {
   const [seatSpacing, setSeatSpacing] = useState(35);
   const [startRow, setStartRow] = useState("A");
   const [seatType, setSeatType] = useState<SeatType>("regular");
+  const [seatShape, setSeatShape] = useState<SeatShape>("circle");
 
   const handleGenerate = () => {
     onGenerate({
-      rows,
-      columns,
-      rowSpacing,
-      seatSpacing,
-      startRow,
-      seatType,
+      rows: Number(rows) || 1, // Asegurar número válido
+      columns: Number(columns) || 1,
+      rowSpacing: Number(rowSpacing) || 20,
+      seatSpacing: Number(seatSpacing) || 20,
+      startRow: startRow || "A",
+      seatType, 
+      seatShape,
       zoneId: `zone-${Date.now()}`,
     });
   };
@@ -39,77 +41,68 @@ export const SeatingGenerator = ({ onGenerate }: SeatingGeneratorProps) => {
 
       <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3">
-          <div>
-            <Label htmlFor="rows" className="text-xs">Filas</Label>
-            <Input
-              id="rows"
-              type="number"
-              min="1"
-              max="50"
-              value={rows}
-              onChange={(e) => setRows(parseInt(e.target.value) || 1)}
-              className="h-9"
-            />
-          </div>
-          <div>
-            <Label htmlFor="columns" className="text-xs">Columnas</Label>
-            <Input
-              id="columns"
-              type="number"
-              min="1"
-              max="50"
-              value={columns}
-              onChange={(e) => setColumns(parseInt(e.target.value) || 1)}
-              className="h-9"
-            />
-          </div>
+            <div>
+                <Label htmlFor="rows" className="text-xs">Filas</Label>
+                <Input 
+                  id="rows" 
+                  type="number" 
+                  min="1" 
+                  value={rows} 
+                  onChange={(e) => setRows(parseInt(e.target.value) || 0)} 
+                  className="h-9" 
+                />
+            </div>
+            <div>
+                <Label htmlFor="cols" className="text-xs">Cols</Label>
+                <Input 
+                  id="cols" 
+                  type="number" 
+                  min="1" 
+                  value={columns} 
+                  onChange={(e) => setColumns(parseInt(e.target.value) || 0)} 
+                  className="h-9" 
+                />
+            </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
-          <div>
-            <Label htmlFor="rowSpacing" className="text-xs">Espacio Filas</Label>
-            <Input
-              id="rowSpacing"
-              type="number"
-              min="20"
-              max="100"
-              value={rowSpacing}
-              onChange={(e) => setRowSpacing(parseInt(e.target.value) || 20)}
-              className="h-9"
-            />
-          </div>
-          <div>
-            <Label htmlFor="seatSpacing" className="text-xs">Espacio Asientos</Label>
-            <Input
-              id="seatSpacing"
-              type="number"
-              min="20"
-              max="100"
-              value={seatSpacing}
-              onChange={(e) => setSeatSpacing(parseInt(e.target.value) || 20)}
-              className="h-9"
-            />
-          </div>
+            <div>
+                <Label htmlFor="rspace" className="text-xs">Esp. Fila</Label>
+                <Input 
+                  id="rspace" 
+                  type="number" 
+                  value={rowSpacing} 
+                  onChange={(e) => setRowSpacing(parseInt(e.target.value) || 0)} 
+                  className="h-9" 
+                />
+            </div>
+            <div>
+                <Label htmlFor="sspace" className="text-xs">Esp. Asiento</Label>
+                <Input 
+                  id="sspace" 
+                  type="number" 
+                  value={seatSpacing} 
+                  onChange={(e) => setSeatSpacing(parseInt(e.target.value) || 0)} 
+                  className="h-9" 
+                />
+            </div>
+        </div>
+        
+        <div>
+          <Label htmlFor="seatShape" className="text-xs">Forma</Label>
+          <Select value={seatShape} onValueChange={(v) => setSeatShape(v as SeatShape)}>
+            <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="circle">Círculo</SelectItem>
+              <SelectItem value="square">Cuadrado</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
         <div>
-          <Label htmlFor="startRow" className="text-xs">Letra Inicial</Label>
-          <Input
-            id="startRow"
-            type="text"
-            maxLength={1}
-            value={startRow}
-            onChange={(e) => setStartRow(e.target.value.toUpperCase())}
-            className="h-9"
-          />
-        </div>
-
-        <div>
-          <Label htmlFor="seatType" className="text-xs">Tipo de Asiento</Label>
-          <Select value={seatType} onValueChange={(value) => setSeatType(value as SeatType)}>
-            <SelectTrigger className="h-9">
-              <SelectValue />
-            </SelectTrigger>
+          <Label htmlFor="seatType" className="text-xs">Tipo</Label>
+          <Select value={seatType} onValueChange={(v) => setSeatType(v as SeatType)}>
+            <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="regular">Regular</SelectItem>
               <SelectItem value="vip">VIP</SelectItem>
@@ -118,11 +111,7 @@ export const SeatingGenerator = ({ onGenerate }: SeatingGeneratorProps) => {
           </Select>
         </div>
 
-        <Button 
-          onClick={handleGenerate} 
-          className="w-full gap-2"
-          size="lg"
-        >
+        <Button onClick={handleGenerate} className="w-full gap-2" size="lg">
           <Plus className="h-4 w-4" />
           Generar Asientos
         </Button>

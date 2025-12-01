@@ -1,15 +1,17 @@
-import { useEffect, useRef, useState } from "react";
-import { Canvas as FabricCanvas, Circle, Rect, Polygon, IText, Point, Group, FabricObject, util, Line, FabricImage } from "fabric";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { Canvas as FabricCanvas, Circle, Rect, Polygon, IText, Point, Group, FabricObject, util, Line, FabricImage, ActiveSelection } from "fabric";
 import { Toolbar } from "./Toolbar";
 import { ColorPicker } from "./ColorPicker";
 import { SeatingGenerator } from "./SeatingGenerator";
 import { PropertiesPanel } from "./PropertiesPanel";
 import { ZoneManager } from "./ZoneManager";
 import { toast } from "sonner";
-import { ToolType, SeatingGrid, Zone, SeatType, CustomFabricObject } from "@/types/canvas";
-import { Slider } from "@/components/ui/slider"; // Asegúrate de tener este componente
+import { ToolType, SeatingGrid, Zone, SeatType, CustomFabricObject, CanvasState } from "@/types/canvas";
+import { Slider } from "@/components/ui/slider";
 
-// Algoritmo de Ray Casting para punto en polígono
+// Constantes para Snapping
+const SNAP_THRESHOLD = 15;
+
 function isPointInPolygon(point: { x: number; y: number }, vs: { x: number; y: number }[]) {
     let x = point.x, y = point.y;
     let inside = false;
@@ -27,27 +29,46 @@ function isPointInPolygon(point: { x: number; y: number }, vs: { x: number; y: n
 export const Canvas = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null); // Referencia para el input de archivo
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   const [fabricCanvas, setFabricCanvas] = useState<FabricCanvas | null>(null);
   const [activeColor, setActiveColor] = useState("#0EA5E9");
   const [activeTool, setActiveTool] = useState<ToolType>("select");
-  const [selectedObject, setSelectedObject] = useState<CustomFabricObject | null>(null);
+  
+  const [selectedObjects, setSelectedObjects] = useState<CustomFabricObject[]>([]);
   const [zones, setZones] = useState<Zone[]>([]);
   
-  // Estados para polígono
   const [polygonPoints, setPolygonPoints] = useState<{ x: number; y: number }[]>([]);
   const [guideLine, setGuideLine] = useState<Line | null>(null); 
   
-  // Estados para paneo
   const [isDragging, setIsDragging] = useState(false);
   const [lastPosX, setLastPosX] = useState(0);
   const [lastPosY, setLastPosY] = useState(0);
 
-  // Estado para opacidad de fondo
   const [bgOpacity, setBgOpacity] = useState(0.5);
 
-  // Inicialización del Canvas
+  const [history, setHistory] = useState<CanvasState[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const isHistoryLocked = useRef(false); 
+
+  const saveHistory = useCallback(() => {
+      if (!fabricCanvas || isHistoryLocked.current) return;
+      
+      const json = fabricCanvas.toJSON(['id', 'name', 'price', 'capacity', 'zoneId', '_customType']);
+      const currentState: CanvasState = {
+          canvasJSON: json,
+          zones: [...zones] 
+      };
+
+      setHistory(prev => {
+          const newHistory = prev.slice(0, historyIndex + 1);
+          newHistory.push(currentState);
+          if (newHistory.length > 50) newHistory.shift(); 
+          return newHistory;
+      });
+      setHistoryIndex(prev => Math.min(prev + 1, 49)); 
+  }, [fabricCanvas, zones, historyIndex]);
+
   useEffect(() => {
     if (!canvasRef.current || !containerRef.current) return;
 
@@ -56,39 +77,34 @@ export const Canvas = () => {
       height: containerRef.current.clientHeight,
       backgroundColor: "#f8fafc",
       selection: true,
+      preserveObjectStacking: true, 
     });
 
-    // Configurar pincel
     if (canvas.freeDrawingBrush) {
       canvas.freeDrawingBrush.color = activeColor;
       canvas.freeDrawingBrush.width = 3;
     }
 
-    // Eventos de Selección
-    canvas.on("selection:created", (e) => {
-      setSelectedObject((e.selected?.[0] as CustomFabricObject) || null);
-    });
-    canvas.on("selection:updated", (e) => {
-      setSelectedObject((e.selected?.[0] as CustomFabricObject) || null);
-    });
-    canvas.on("selection:cleared", () => {
-      setSelectedObject(null);
-    });
+    const handleSelection = () => {
+        const selection = canvas.getActiveObjects() as CustomFabricObject[];
+        setSelectedObjects(selection || []);
+    };
 
-    // Eventos de Zoom (Rueda del Ratón)
+    canvas.on("selection:created", handleSelection);
+    canvas.on("selection:updated", handleSelection);
+    canvas.on("selection:cleared", () => setSelectedObjects([]));
+
     canvas.on("mouse:wheel", (opt) => {
       const delta = opt.e.deltaY;
       let zoom = canvas.getZoom();
       zoom *= 0.999 ** delta;
       if (zoom > 20) zoom = 20;
       if (zoom < 0.01) zoom = 0.01;
-      
       canvas.zoomToPoint(new Point(opt.e.offsetX, opt.e.offsetY), zoom);
       opt.e.preventDefault();
       opt.e.stopPropagation();
     });
 
-    // Eventos de Paneo
     canvas.on("mouse:down", (opt) => {
       const evt = opt.e;
       if (activeTool === "hand" || evt.altKey) {
@@ -99,11 +115,90 @@ export const Canvas = () => {
       }
     });
 
-    // Mouse Move combinado (Paneo + Línea Guía)
+    canvas.on("object:modified", () => saveHistory());
+    
+    canvas.on('object:moving', (options) => {
+        const target = options.target;
+        if (!target) return;
+        canvas.getObjects().forEach((obj: any) => {
+            if (obj._customType === 'guide') canvas.remove(obj);
+        });
+
+        const w = target.width * target.scaleX;
+        const h = target.height * target.scaleY;
+        const center = target.getCenterPoint();
+
+        const targetPoints = {
+            left: target.left,
+            right: target.left + w,
+            top: target.top,
+            bottom: target.top + h,
+            centerX: center.x,
+            centerY: center.y
+        };
+
+        canvas.getObjects().forEach((obj: any) => {
+            if (obj === target || obj._customType === 'guide' || !obj.visible) return;
+
+            const objW = obj.width * obj.scaleX;
+            const objH = obj.height * obj.scaleY;
+            const objCenter = obj.getCenterPoint();
+            const objPoints = {
+                left: obj.left,
+                right: obj.left + objW,
+                top: obj.top,
+                bottom: obj.top + objH,
+                centerX: objCenter.x,
+                centerY: objCenter.y
+            };
+
+            if (Math.abs(targetPoints.left - objPoints.left) < SNAP_THRESHOLD) {
+                target.set('left', objPoints.left);
+                drawGuide(targetPoints.left, null, 'vertical');
+            }
+            if (Math.abs(targetPoints.left - objPoints.right) < SNAP_THRESHOLD) {
+                target.set('left', objPoints.right);
+                drawGuide(targetPoints.left, null, 'vertical');
+            }
+            if (Math.abs(targetPoints.top - objPoints.top) < SNAP_THRESHOLD) {
+                target.set('top', objPoints.top);
+                drawGuide(null, targetPoints.top, 'horizontal');
+            }
+            if (Math.abs(targetPoints.top - objPoints.bottom) < SNAP_THRESHOLD) {
+                target.set('top', objPoints.bottom);
+                drawGuide(null, targetPoints.top, 'horizontal');
+            }
+        });
+        
+        function drawGuide(x: number | null, y: number | null, type: 'vertical' | 'horizontal') {
+            if (type === 'vertical' && x !== null) {
+                const line = new Line([x, 0, x, canvas.height], { stroke: 'red', strokeDashArray: [5, 5], selectable: false, evented: false });
+                (line as CustomFabricObject)._customType = 'guide';
+                canvas.add(line);
+            } else if (type === 'horizontal' && y !== null) {
+                const line = new Line([0, y, canvas.width, y], { stroke: 'red', strokeDashArray: [5, 5], selectable: false, evented: false });
+                (line as CustomFabricObject)._customType = 'guide';
+                canvas.add(line);
+            }
+        }
+    });
+
+    canvas.on('mouse:up', () => {
+        canvas.getObjects().forEach((obj: any) => {
+            if (obj._customType === 'guide') canvas.remove(obj);
+        });
+        
+        if (isDragging) {
+            canvas.setViewportTransform(canvas.viewportTransform || [1, 0, 0, 1, 0, 0]);
+            setIsDragging(false);
+            canvas.selection = true;
+        } else {
+            saveHistory();
+        }
+    });
+
     canvas.on("mouse:move", (opt) => {
       const e = opt.e;
-      
-      // 1. Lógica de Paneo
       if (isDragging) {
         const vpt = canvas.viewportTransform;
         if (vpt) {
@@ -117,16 +212,8 @@ export const Canvas = () => {
       }
     });
 
-    canvas.on("mouse:up", () => {
-      if (isDragging) {
-        canvas.setViewportTransform(canvas.viewportTransform || [1, 0, 0, 1, 0, 0]);
-        setIsDragging(false);
-        canvas.selection = true;
-      }
-    });
-
     setFabricCanvas(canvas);
-    toast.success("Lienzo listo. Usa la rueda del mouse para zoom y Alt+Drag para moverte.");
+    setTimeout(() => saveHistory(), 100); 
 
     const resizeObserver = new ResizeObserver(() => {
       if (containerRef.current && canvas) {
@@ -145,26 +232,18 @@ export const Canvas = () => {
     };
   }, []); 
 
-  // Efecto separado para manejar el movimiento del mouse y la línea guía
   useEffect(() => {
     if (!fabricCanvas) return;
-
     const handleMouseMove = (opt: any) => {
         if (activeTool === "polygon" && polygonPoints.length > 0) {
             const pointer = fabricCanvas.getScenePoint(opt.e);
             const lastPoint = polygonPoints[polygonPoints.length - 1];
-
             if (guideLine) {
                 guideLine.set({ x2: pointer.x, y2: pointer.y });
                 fabricCanvas.requestRenderAll();
             } else {
                 const newLine = new Line([lastPoint.x, lastPoint.y, pointer.x, pointer.y], {
-                    stroke: activeColor,
-                    strokeWidth: 1,
-                    strokeDashArray: [5, 5], 
-                    selectable: false,
-                    evented: false,
-                    opacity: 0.7
+                    stroke: activeColor, strokeWidth: 1, strokeDashArray: [5, 5], selectable: false, evented: false, opacity: 0.7
                 });
                 fabricCanvas.add(newLine);
                 setGuideLine(newLine);
@@ -172,262 +251,194 @@ export const Canvas = () => {
             }
         }
     };
-
     fabricCanvas.on("mouse:move", handleMouseMove);
-
-    return () => {
-        fabricCanvas.off("mouse:move", handleMouseMove);
-    };
+    return () => { fabricCanvas.off("mouse:move", handleMouseMove); };
   }, [fabricCanvas, activeTool, polygonPoints, guideLine, activeColor]);
 
-
-  // Actualizar configuración según herramienta
-  useEffect(() => {
-    if (!fabricCanvas) return;
-
-    fabricCanvas.isDrawingMode = activeTool === "draw";
-    
-    if (activeTool === "draw" && fabricCanvas.freeDrawingBrush) {
-      fabricCanvas.freeDrawingBrush.color = activeColor;
-    }
-
-    if (activeTool === "hand") {
-      fabricCanvas.defaultCursor = "grab";
-      fabricCanvas.hoverCursor = "grab";
-      fabricCanvas.selection = false;
-    } else if (activeTool === "polygon") {
-      fabricCanvas.defaultCursor = "crosshair";
-      fabricCanvas.selection = false;
-    } else {
-      fabricCanvas.defaultCursor = "default";
-      fabricCanvas.hoverCursor = "move";
-      fabricCanvas.selection = true;
-    }
-
-    if (activeTool !== "polygon") {
-      setPolygonPoints([]);
-      if (guideLine) {
-          fabricCanvas.remove(guideLine);
-          setGuideLine(null);
-      }
-      const objects = fabricCanvas.getObjects();
-      objects.forEach((obj: any) => {
-        if ((obj instanceof Circle && obj.radius === 4) || obj.id === 'temp-poly-line') {
-          fabricCanvas.remove(obj);
-        }
-      });
-      fabricCanvas.requestRenderAll();
-    }
-
-  }, [activeTool, activeColor, fabricCanvas]);
-
-  // Manejo de clicks para Polígonos
   useEffect(() => {
     if (!fabricCanvas || activeTool !== "polygon") return;
-
     const handleCanvasClick = (opt: any) => {
       if (isDragging || opt.e.altKey) return;
-
       const pointer = fabricCanvas.getScenePoint(opt.e);
-      
-      // Verificar cierre ANTES de agregar el punto
       if (polygonPoints.length > 2) {
         const start = polygonPoints[0];
         const dist = Math.sqrt(Math.pow(pointer.x - start.x, 2) + Math.pow(pointer.y - start.y, 2));
-        
-        if (dist < 20) {
-          finishPolygon(polygonPoints);
-          return;
-        }
+        if (dist < 20) { finishPolygon(polygonPoints); return; }
       }
-
       const points = [...polygonPoints, { x: pointer.x, y: pointer.y }];
       setPolygonPoints(points);
-
-      // Dibujar punto
-      const circle = new Circle({
-        left: pointer.x - 4,
-        top: pointer.y - 4,
-        radius: 4,
-        fill: "transparent",
-        stroke: activeColor,
-        strokeWidth: 2,
-        selectable: false,
-        evented: false,
-      });
+      const circle = new Circle({ left: pointer.x - 4, top: pointer.y - 4, radius: 4, fill: "transparent", stroke: activeColor, strokeWidth: 2, selectable: false, evented: false });
       fabricCanvas.add(circle);
-
-      // Línea permanente temporal
-      if (polygonPoints.length > 0) {
-          const lastPoint = polygonPoints[polygonPoints.length - 1];
-          const fixedLine = new Line([lastPoint.x, lastPoint.y, pointer.x, pointer.y], {
-              stroke: activeColor,
-              strokeWidth: 2,
-              selectable: false,
-              evented: false,
-              id: 'temp-poly-line' 
-          } as any);
-          fabricCanvas.add(fixedLine);
-      }
-      
-      // Resetear línea guía para que se cree una nueva desde el nuevo punto
-      if (guideLine) {
-          fabricCanvas.remove(guideLine);
-          setGuideLine(null); 
-      }
+      if (guideLine) { fabricCanvas.remove(guideLine); setGuideLine(null); }
     };
 
     const finishPolygon = (points: {x: number, y: number}[]) => {
         const zoneId = `zone-${Date.now()}`;
-        
-        // 1. Crear el Polígono
-        const polygon = new Polygon(points, {
-          fill: activeColor + "80",
-          stroke: activeColor,
-          strokeWidth: 2,
-          objectCaching: false,
-        });
-
-        // 2. Crear las Etiquetas de los Lados
+        const polygon = new Polygon(points, { fill: activeColor + "80", stroke: activeColor, strokeWidth: 2, objectCaching: false });
         const labels = points.map((point, index) => {
             const nextPoint = points[(index + 1) % points.length];
             const midX = (point.x + nextPoint.x) / 2;
             const midY = (point.y + nextPoint.y) / 2;
-
-            return new IText(`${index + 1}`, {
-                left: midX,
-                top: midY,
-                fontSize: 14,
-                fontWeight: 'bold',
-                fill: "#ffffff",
-                backgroundColor: "#00000080", 
-                fontFamily: "Arial",
-                originX: 'center',
-                originY: 'center',
-                selectable: false,
-                evented: false,
-            });
+            return new IText(`${index + 1}`, { left: midX, top: midY, fontSize: 14, fontWeight: 'bold', fill: "#ffffff", backgroundColor: "#00000080", fontFamily: "Arial", originX: 'center', originY: 'center', selectable: false, evented: false });
         });
-
-        // 3. AGRUPAR Polígono + Etiquetas
-        const group = new Group([polygon, ...labels], {
-            objectCaching: false,
-            subTargetCheck: true, 
-        });
-
+        const group = new Group([polygon, ...labels], { objectCaching: false, subTargetCheck: true });
         (group as CustomFabricObject).id = `poly-group-${Date.now()}`;
         (group as CustomFabricObject).zoneId = zoneId;
         (group as CustomFabricObject).name = `Zona ${zones.length + 1}`;
         (group as CustomFabricObject)._customType = "zone";
-
-        // Limpiar marcadores temporales
         const objects = fabricCanvas.getObjects();
         objects.forEach((obj: any) => {
-           if ((obj instanceof Circle && obj.radius === 4) || obj.id === 'temp-poly-line') {
-               fabricCanvas.remove(obj);
-           }
+           if ((obj instanceof Circle && obj.radius === 4) || obj.id === 'temp-poly-line') fabricCanvas.remove(obj);
         });
-        
-        if (guideLine) {
-            fabricCanvas.remove(guideLine);
-            setGuideLine(null);
-        }
-
+        if (guideLine) { fabricCanvas.remove(guideLine); setGuideLine(null); }
         fabricCanvas.add(group);
         fabricCanvas.setActiveObject(group);
         fabricCanvas.renderAll();
-        
-        const newZone: Zone = {
-          id: zoneId,
-          name: `Zona Personalizada ${zones.length + 1}`,
-          color: activeColor,
-          type: "custom",
-          visible: true
-        };
-        setZones(prev => [...prev, newZone]);
-        
+        setZones(prev => [...prev, { id: zoneId, name: `Zona Personalizada ${zones.length + 1}`, color: activeColor, type: "custom", visible: true }]);
         setPolygonPoints([]);
-        setActiveTool("select"); // Auto quitar herramienta poligono
-        toast.success("Zona agrupada creada correctamente");
+        setActiveTool("select");
+        toast.success("Zona creada");
+        saveHistory();
     };
-
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Enter" && polygonPoints.length >= 3) {
-        finishPolygon(polygonPoints);
-      } else if (e.key === "Escape") {
+      if (e.key === "Enter" && polygonPoints.length >= 3) finishPolygon(polygonPoints);
+      else if (e.key === "Escape") {
         setPolygonPoints([]);
-        if (guideLine) {
-            fabricCanvas.remove(guideLine);
-            setGuideLine(null);
-        }
+        if (guideLine) { fabricCanvas.remove(guideLine); setGuideLine(null); }
         const objects = fabricCanvas.getObjects();
-        objects.forEach((obj: any) => {
-           if ((obj instanceof Circle && obj.radius === 4) || obj.id === 'temp-poly-line') {
-               fabricCanvas.remove(obj);
-           }
-        });
+        objects.forEach((obj: any) => { if ((obj instanceof Circle && obj.radius === 4)) fabricCanvas.remove(obj); });
         fabricCanvas.requestRenderAll();
         toast.info("Polígono cancelado");
       }
     };
-
     fabricCanvas.on("mouse:down", handleCanvasClick);
     window.addEventListener("keydown", handleKeyDown);
+    return () => { fabricCanvas.off("mouse:down", handleCanvasClick); window.removeEventListener("keydown", handleKeyDown); };
+  }, [fabricCanvas, activeTool, polygonPoints, activeColor, zones, isDragging, guideLine, saveHistory]);
 
-    return () => {
-      fabricCanvas.off("mouse:down", handleCanvasClick);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [fabricCanvas, activeTool, polygonPoints, activeColor, zones, isDragging, guideLine]);
+  const handleDuplicate = useCallback(() => {
+    if (!fabricCanvas) return;
+    const activeObjects = fabricCanvas.getActiveObjects();
+    
+    if (!activeObjects.length) {
+        toast.warning("Selecciona algo para duplicar");
+        return;
+    }
 
-  // --- CARGA DE IMAGEN DE FONDO ---
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !fabricCanvas) return;
-
-    const reader = new FileReader();
-    reader.onload = (f) => {
-      const data = f.target?.result as string;
-      FabricImage.fromURL(data).then((img) => {
-        // Escalar imagen para que quepa en el canvas si es muy grande
-        const canvasWidth = fabricCanvas.width;
-        const canvasHeight = fabricCanvas.height;
-        const imgWidth = img.width || 1;
-        const imgHeight = img.height || 1;
-        
-        const scaleX = canvasWidth / imgWidth;
-        const scaleY = canvasHeight / imgHeight;
-        const scale = Math.min(scaleX, scaleY); // Ajustar sin deformar (cover) o usar Math.max para fill
-
-        img.set({
-            scaleX: scale,
-            scaleY: scale,
-            originX: 'left',
-            originY: 'top',
-            opacity: bgOpacity
+    if (activeObjects.length === 1) {
+        const obj = activeObjects[0] as CustomFabricObject;
+        obj.clone().then((cloned: CustomFabricObject) => {
+            cloned.set({
+                left: (obj.left || 0) + 20,
+                top: (obj.top || 0) + 20,
+                evented: true,
+                id: `clone-${Date.now()}`,
+                name: `${obj.name} (Copia)`,
+                zoneId: obj.zoneId, 
+                price: obj.price,
+                capacity: obj.capacity,
+                _customType: obj._customType
+            });
+            fabricCanvas.discardActiveObject();
+            fabricCanvas.add(cloned);
+            fabricCanvas.setActiveObject(cloned);
+            fabricCanvas.requestRenderAll();
+            saveHistory();
+            toast.success("Elemento duplicado");
         });
+    } else {
+        const activeSelection = fabricCanvas.getActiveObject();
+        if(!activeSelection) return;
 
-        // Centrar
-        img.set({
-            left: (canvasWidth - imgWidth * scale) / 2,
-            top: (canvasHeight - imgHeight * scale) / 2
+        activeSelection.clone().then((clonedSelection: any) => {
+            fabricCanvas.discardActiveObject();
+            
+            clonedSelection.set({
+                left: clonedSelection.left + 20,
+                top: clonedSelection.top + 20,
+                evented: true,
+                canvas: fabricCanvas 
+            });
+
+            clonedSelection.forEachObject((obj: CustomFabricObject) => {
+                obj.set({
+                    id: `clone-${Date.now()}-${Math.random()}`,
+                });
+                fabricCanvas.add(obj);
+            });
+            
+            const newSelection = new ActiveSelection(clonedSelection.getObjects(), { canvas: fabricCanvas });
+            fabricCanvas.setActiveObject(newSelection);
+            fabricCanvas.requestRenderAll();
+            saveHistory();
+            toast.success("Elementos duplicados");
         });
+    }
+  }, [fabricCanvas, saveHistory]);
 
-        fabricCanvas.backgroundImage = img;
-        fabricCanvas.requestRenderAll();
-        toast.success("Imagen de fondo cargada");
+  const handleUndo = () => {
+      if (historyIndex <= 0 || !fabricCanvas) return;
+      isHistoryLocked.current = true;
+      const prevIndex = historyIndex - 1;
+      const prevState = history[prevIndex];
+      fabricCanvas.loadFromJSON(prevState.canvasJSON, () => {
+          fabricCanvas.requestRenderAll();
+          setZones(prevState.zones);
+          setHistoryIndex(prevIndex);
+          isHistoryLocked.current = false;
+          toast.info("Deshacer");
       });
-    };
-    reader.readAsDataURL(file);
   };
 
-  const handleOpacityChange = (val: number[]) => {
-      const newOpacity = val[0];
-      setBgOpacity(newOpacity);
-      if (fabricCanvas && fabricCanvas.backgroundImage) {
-          (fabricCanvas.backgroundImage as FabricObject).opacity = newOpacity;
+  const handleRedo = () => {
+      if (historyIndex >= history.length - 1 || !fabricCanvas) return;
+      isHistoryLocked.current = true;
+      const nextIndex = historyIndex + 1;
+      const nextState = history[nextIndex];
+      fabricCanvas.loadFromJSON(nextState.canvasJSON, () => {
           fabricCanvas.requestRenderAll();
-      }
+          setZones(nextState.zones);
+          setHistoryIndex(nextIndex);
+          isHistoryLocked.current = false;
+          toast.info("Rehacer");
+      });
+  };
+
+  const handleMoveLayer = (zoneId: string, direction: 'up' | 'down' | 'top' | 'bottom') => {
+    if (!fabricCanvas) return;
+    const objects = fabricCanvas.getObjects() as CustomFabricObject[];
+    const zoneObjects = objects.filter(obj => obj.zoneId === zoneId);
+    zoneObjects.forEach(obj => {
+        if (direction === 'top') obj.bringToFront();
+        if (direction === 'bottom') obj.sendToBack();
+        if (direction === 'up') obj.bringForward();
+        if (direction === 'down') obj.sendBackwards();
+    });
+    fabricCanvas.requestRenderAll();
+    saveHistory();
+  };
+  
+  const handleUpdateProperties = (properties: Record<string, any>) => {
+    if (!fabricCanvas || selectedObjects.length === 0) return;
+
+    selectedObjects.forEach(obj => {
+        Object.entries(properties).forEach(([key, value]) => {
+            if (value !== undefined && value !== "") {
+                (obj as any)[key] = value;
+            }
+        });
+    });
+
+    if (properties.name) {
+        setZones(prevZones => prevZones.map(z => {
+            const isSelected = selectedObjects.some(o => o.zoneId === z.id && o._customType === 'zone');
+            return isSelected ? { ...z, name: properties.name } : z;
+        }));
+    }
+
+    fabricCanvas.requestRenderAll();
+    toast.success("Propiedades actualizadas");
+    saveHistory();
   };
 
   const handleToolClick = (tool: ToolType) => {
@@ -435,41 +446,22 @@ export const Canvas = () => {
     if (!fabricCanvas) return;
 
     const center = fabricCanvas.getCenterPoint();
-    const vpt = fabricCanvas.viewportTransform;
-    const realCenter = {
-        x: (center.x - (vpt?.[4] || 0)) / (vpt?.[0] || 1),
-        y: (center.y - (vpt?.[5] || 0)) / (vpt?.[3] || 1)
-    };
+    const vpt = fabricCanvas.viewportTransform || [1,0,0,1,0,0];
+    const realCenter = { x: (center.x - vpt[4]) / vpt[0], y: (center.y - vpt[5]) / vpt[3] };
 
     if (tool === "rectangle") {
       const zoneId = `zone-${Date.now()}`;
-      const rect = new Rect({
-        left: realCenter.x - 50,
-        top: realCenter.y - 50,
-        fill: activeColor + "80",
-        width: 100,
-        height: 100,
-        stroke: activeColor,
-        strokeWidth: 2,
-      });
-      
+      const rect = new Rect({ left: realCenter.x - 50, top: realCenter.y - 50, fill: activeColor + "80", width: 100, height: 100, stroke: activeColor, strokeWidth: 2 });
       (rect as CustomFabricObject).id = `rect-${Date.now()}`;
       (rect as CustomFabricObject).zoneId = zoneId;
       (rect as CustomFabricObject).name = `Rectángulo ${zones.length + 1}`;
       (rect as CustomFabricObject)._customType = "zone";
-
       fabricCanvas.add(rect);
       
-      const newZone: Zone = {
-        id: zoneId,
-        name: `Zona ${zones.length + 1}`,
-        color: activeColor,
-        type: "section",
-        visible: true
-      };
-      setZones([...zones, newZone]);
+      setZones([...zones, { id: zoneId, name: `Zona ${zones.length + 1}`, color: activeColor, type: "section", visible: true }]);
       setActiveTool("select");
       toast.success("Zona rectangular agregada");
+      saveHistory();
     } 
     else if (tool === "circle") {
       const circle = new Circle({
@@ -502,7 +494,6 @@ export const Canvas = () => {
 
   const handleGenerateSeating = (grid: SeatingGrid) => {
     if (!fabricCanvas) return;
-
     const seatRadius = 12;
     const getSeatColor = (type: SeatType) => {
       switch (type) {
@@ -514,51 +505,31 @@ export const Canvas = () => {
     };
 
     let targetZoneId = grid.zoneId;
-    let startX = 0;
-    let startY = 0;
-    let endX = 0;
-    let endY = 0;
-    
+    let startX = 0, startY = 0, endX = 0, endY = 0;
     let polygonVertices: { x: number; y: number }[] | null = null;
     let isZoneSelected = false;
     let selectionTransform = null; 
+    
+    const targetObj = selectedObjects.length > 0 ? selectedObjects[0] : null;
 
-    // Detectar selección
-    if (selectedObject && (selectedObject._customType === "zone" || selectedObject.type === "rect" || selectedObject.type === "group")) {
+    if (targetObj && (targetObj._customType === "zone" || targetObj.type === "rect" || targetObj.type === "group")) {
         isZoneSelected = true;
-        if (selectedObject.zoneId) targetZoneId = selectedObject.zoneId;
+        if (targetObj.zoneId) targetZoneId = targetObj.zoneId;
+        const br = targetObj.getBoundingRect();
+        startX = br.left; startY = br.top; endX = br.left + br.width; endY = br.top + br.height;
 
-        const boundingRect = selectedObject.getBoundingRect();
-        startX = boundingRect.left;
-        startY = boundingRect.top;
-        endX = boundingRect.left + boundingRect.width;
-        endY = boundingRect.top + boundingRect.height;
-
-        if (selectedObject.type === 'group') {
-            const group = selectedObject as Group;
+        if (targetObj.type === 'group') {
+            const group = targetObj as Group;
             const polygon = group.getObjects().find(o => o.type === 'polygon') as Polygon;
             if (polygon) {
-                // Transformar vértices al sistema de coordenadas global
                 const matrix = polygon.calcTransformMatrix();
-                // Si está en un grupo, necesitamos aplicar también la matriz del grupo
-                // Nota: Fabric v6 maneja esto mejor, pero a veces hay que combinar matrices
-                // Para simplificar, usaremos los puntos relativos transformados por el objeto poligono
                 polygonVertices = polygon.points.map(p => util.transformPoint(p, matrix));
-                
-                // Corrección: si el grupo ha sido movido, hay que sumar el offset del grupo
-                const groupCenter = group.getCenterPoint();
-                // Un enfoque más robusto sería desagrupar temporalmente o usar utilidades avanzadas
             }
-        } 
-        else if (selectedObject.type === 'polygon') {
-             const polygon = selectedObject as Polygon;
-             const matrix = polygon.calcTransformMatrix();
-             polygonVertices = polygon.points.map(p => util.transformPoint(p, matrix));
-        }
-        else {
-            selectionTransform = selectedObject;
-        }
-        
+        } else if (targetObj.type === 'polygon') {
+            const polygon = targetObj as Polygon;
+            const matrix = polygon.calcTransformMatrix();
+            polygonVertices = polygon.points.map(p => util.transformPoint(p, matrix));
+        } else { selectionTransform = targetObj; }
     } else {
         const vpt = fabricCanvas.viewportTransform || [1,0,0,1,0,0];
         const width = fabricCanvas.width / vpt[0];
@@ -585,48 +556,41 @@ export const Canvas = () => {
 
         if (isZoneSelected) {
             if (polygonVertices) {
-                // TODO: Mejorar la precisión de coordenadas en grupos transformados
-                // Por ahora, asumimos bounding box simple si es grupo complejo
-                // o intentamos verificar con containsPoint si es objeto simple
-                if (selectedObject.type === 'polygon' || selectedObject.type === 'rect') {
-                     if (!selectedObject.containsPoint(testPoint)) shouldAdd = false;
-                }
+                if (!isPointInPolygon({x: testPoint.x, y: testPoint.y}, polygonVertices)) shouldAdd = false;
             } else if (selectionTransform) {
-                if (!selectionTransform.containsPoint(testPoint)) {
-                    shouldAdd = false;
-                }
+                if (!selectionTransform.containsPoint(testPoint)) shouldAdd = false;
             }
         }
 
         if (shouldAdd) {
             colIndex++;
-            const seat = new Circle({
-              left: x,
-              top: y,
-              radius: seatRadius,
-              fill: getSeatColor(grid.seatType),
-              stroke: "#1e293b",
-              strokeWidth: 1,
-            });
+            let seatObject;
+            
+            if (grid.seatShape === 'square') {
+                seatObject = new Rect({
+                    left: x, top: y, width: seatRadius * 2, height: seatRadius * 2,
+                    fill: getSeatColor(grid.seatType), stroke: "#1e293b", strokeWidth: 1
+                });
+            } else {
+                seatObject = new Circle({
+                    left: x, top: y, radius: seatRadius,
+                    fill: getSeatColor(grid.seatType), stroke: "#1e293b", strokeWidth: 1
+                });
+            }
 
-            (seat as CustomFabricObject).id = `seat-${targetZoneId}-${rowIndex}-${colIndex}`;
-            (seat as CustomFabricObject).zoneId = targetZoneId;
-            (seat as CustomFabricObject).name = `${rowLetter}${colIndex}`;
-            (seat as CustomFabricObject)._customType = "seat";
+            (seatObject as CustomFabricObject).id = `seat-${targetZoneId}-${rowIndex}-${colIndex}`;
+            (seatObject as CustomFabricObject).zoneId = targetZoneId;
+            (seatObject as CustomFabricObject).name = `${rowLetter}${colIndex}`;
+            (seatObject as CustomFabricObject)._customType = "seat";
 
             const seatNumber = new IText(`${rowLetter}${colIndex}`, {
               left: x + seatRadius - 6,
               top: y + seatRadius - 5,
-              fontSize: 10,
-              fill: "#ffffff",
-              fontFamily: "Arial",
-              selectable: false,
-              evented: false,
-              originX: 'center',
-              originY: 'center'
+              fontSize: 10, fill: "#ffffff", fontFamily: "Arial",
+              selectable: false, evented: false, originX: 'center', originY: 'center'
             });
             
-            fabricCanvas.add(seat);
+            fabricCanvas.add(seatObject);
             fabricCanvas.add(seatNumber);
             addedSeats++;
         }
@@ -637,7 +601,7 @@ export const Canvas = () => {
     
     if (isZoneSelected) {
         setZones(prev => prev.map(z => z.id === targetZoneId ? { ...z, capacity: (z.capacity || 0) + addedSeats } : z));
-        toast.success(`${addedSeats} asientos agregados a la zona`);
+        toast.success(`${addedSeats} asientos agregados a la zona seleccionada`);
     } else {
         const newZone: Zone = {
           id: targetZoneId,
@@ -650,69 +614,67 @@ export const Canvas = () => {
         setZones([...zones, newZone]);
         toast.success(`${addedSeats} asientos generados`);
     }
-    
+    saveHistory();
     setActiveTool("select");
   };
 
-  const handleUpdateProperties = (properties: Record<string, any>) => {
-    if (!selectedObject || !fabricCanvas) return;
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !fabricCanvas) return;
+    const reader = new FileReader();
+    reader.onload = (f) => {
+      const data = f.target?.result as string;
+      FabricImage.fromURL(data).then((img) => {
+        const scale = Math.min(fabricCanvas.width / (img.width || 1), fabricCanvas.height / (img.height || 1));
+        img.set({ scaleX: scale, scaleY: scale, originX: 'left', originY: 'top', opacity: bgOpacity });
+        img.set({ left: (fabricCanvas.width - (img.width||0)*scale)/2, top: (fabricCanvas.height - (img.height||0)*scale)/2 });
+        fabricCanvas.backgroundImage = img;
+        fabricCanvas.requestRenderAll();
+        toast.success("Fondo cargado");
+        saveHistory();
+      });
+    };
+    reader.readAsDataURL(file);
+  };
 
-    Object.entries(properties).forEach(([key, value]) => {
-      (selectedObject as any)[key] = value;
-    });
-
-    if (properties.name && selectedObject.zoneId) {
-        setZones(prevZones => prevZones.map(z => 
-            z.id === selectedObject.zoneId ? { ...z, name: properties.name } : z
-        ));
-    }
-
-    fabricCanvas.requestRenderAll();
-    toast.success("Propiedades actualizadas");
+  const handleOpacityChange = (val: number[]) => {
+      setBgOpacity(val[0]);
+      if (fabricCanvas && fabricCanvas.backgroundImage) {
+          (fabricCanvas.backgroundImage as FabricObject).opacity = val[0];
+          fabricCanvas.requestRenderAll();
+      }
   };
 
   const handleToggleZoneVisibility = (zoneId: string) => {
     if (!fabricCanvas) return;
-
     const zoneIndex = zones.findIndex(z => z.id === zoneId);
     if (zoneIndex === -1) return;
-
     const newVisibility = !zones[zoneIndex].visible;
-
     const objects = fabricCanvas.getObjects() as CustomFabricObject[];
-    objects.forEach(obj => {
-        if (obj.zoneId === zoneId) {
-            obj.set('visible', newVisibility);
-        }
-    });
-
+    objects.forEach(obj => { if (obj.zoneId === zoneId) obj.set('visible', newVisibility); });
     const newZones = [...zones];
     newZones[zoneIndex].visible = newVisibility;
     setZones(newZones);
-
     fabricCanvas.requestRenderAll();
     fabricCanvas.discardActiveObject(); 
+    saveHistory();
   };
 
   const handleDeleteZone = (zoneId: string) => {
     if (!fabricCanvas) return;
-    
     const objects = fabricCanvas.getObjects() as CustomFabricObject[];
     const objectsToRemove = objects.filter(obj => obj.zoneId === zoneId);
-    
     objectsToRemove.forEach(obj => fabricCanvas.remove(obj));
-    
     setZones(zones.filter(z => z.id !== zoneId));
     fabricCanvas.requestRenderAll();
-    toast.success("Zona y elementos eliminados");
+    toast.success("Zona eliminada");
+    saveHistory();
   };
 
   const handleSelectZone = (zoneId: string) => {
     if (!fabricCanvas) return;
-    
     const objects = fabricCanvas.getObjects() as CustomFabricObject[];
     const zoneObjects = objects.filter(obj => obj.zoneId === zoneId);
-    
     if (zoneObjects.length > 0) {
         const mainObj = zoneObjects.find(o => o._customType === "zone") || zoneObjects[0];
         fabricCanvas.setActiveObject(mainObj);
@@ -734,17 +696,13 @@ export const Canvas = () => {
   const handleLoadCanvas = () => {
     if (!fabricCanvas) return;
     const savedData = localStorage.getItem('boleteraMapData');
-    if (!savedData) {
-        toast.error("No hay datos guardados");
-        return;
-    }
-
+    if (!savedData) { toast.error("No hay datos"); return; }
     const parsed = JSON.parse(savedData);
-    
     fabricCanvas.loadFromJSON(parsed.canvas, () => {
         fabricCanvas.requestRenderAll();
         setZones(parsed.zones || []);
-        toast.success("Mapa cargado correctamente");
+        toast.success("Mapa cargado");
+        saveHistory();
     });
   };
 
@@ -755,11 +713,8 @@ export const Canvas = () => {
     fabricCanvas.requestRenderAll();
     setZones([]);
     toast.success("Lienzo limpio");
+    saveHistory();
   };
-
-  const triggerImageUpload = () => {
-      fileInputRef.current?.click();
-  }
 
   return (
     <div className="flex gap-4 p-4 min-h-[calc(100vh-80px)] bg-background h-full">
@@ -770,36 +725,18 @@ export const Canvas = () => {
             onClear={handleClear}
             onSave={handleSaveCanvas}
             onLoad={handleLoadCanvas}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
+            onDuplicate={handleDuplicate}
+            canUndo={historyIndex > 0}
+            canRedo={historyIndex < history.length - 1}
         />
         
-        {/* Control de Imagen de Fondo */}
         <div className="bg-card rounded-xl shadow-lg p-4 border border-border w-[240px]">
             <h3 className="text-sm font-semibold mb-2 text-foreground">Fondo</h3>
-            <input 
-                type="file" 
-                ref={fileInputRef} 
-                onChange={handleImageUpload} 
-                accept="image/*" 
-                className="hidden" 
-            />
-            <button 
-                onClick={triggerImageUpload}
-                className="w-full text-xs bg-secondary hover:bg-secondary/80 py-2 rounded mb-3 text-foreground"
-            >
-                Cargar Imagen
-            </button>
-            <div className="space-y-2">
-                <div className="flex justify-between text-[10px] text-muted-foreground">
-                    <span>Opacidad</span>
-                    <span>{Math.round(bgOpacity * 100)}%</span>
-                </div>
-                <Slider 
-                    value={[bgOpacity]} 
-                    max={1} 
-                    step={0.05}
-                    onValueChange={handleOpacityChange} 
-                />
-            </div>
+            <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
+            <button onClick={() => fileInputRef.current?.click()} className="w-full text-xs bg-secondary hover:bg-secondary/80 py-2 rounded mb-3 text-foreground">Cargar Imagen</button>
+            <Slider value={[bgOpacity]} max={1} step={0.05} onValueChange={handleOpacityChange} />
         </div>
 
         <ColorPicker color={activeColor} onChange={setActiveColor} />
@@ -814,12 +751,13 @@ export const Canvas = () => {
 
       <div className="flex flex-col gap-4">
         <SeatingGenerator onGenerate={handleGenerateSeating} />
-        <PropertiesPanel selectedObject={selectedObject} onUpdate={handleUpdateProperties} />
+        <PropertiesPanel selectedObjects={selectedObjects} onUpdate={handleUpdateProperties} />
         <ZoneManager 
           zones={zones}
           onToggleVisibility={handleToggleZoneVisibility}
           onDeleteZone={handleDeleteZone}
           onSelectZone={handleSelectZone}
+          onMoveLayer={handleMoveLayer}
         />
       </div>
     </div>

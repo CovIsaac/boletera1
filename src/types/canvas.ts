@@ -1,6 +1,7 @@
 import { FabricObject } from "fabric";
 
 export type SeatType = "regular" | "vip" | "accessible" | "blocked";
+export type SeatShape = "circle" | "square" | "icon";
 
 // Extendemos la clase base de Fabric para incluir nuestros metadatos personalizados
 export interface CustomFabricObject extends FabricObject {
@@ -9,8 +10,8 @@ export interface CustomFabricObject extends FabricObject {
   zoneId?: string;
   price?: number;
   capacity?: number;
-  type?: string; // "rect", "circle", "polygon", etc.
-  _customType?: "section" | "seat" | "text" | "zone"; // Para distinguir tipos lógicos
+  type?: string; 
+  _customType?: "section" | "seat" | "text" | "zone" | "guide"; // guide para líneas temporales
 }
 
 export interface Seat {
@@ -31,7 +32,7 @@ export interface Zone {
   type: "section" | "stage" | "aisle" | "custom";
   price?: number;
   capacity?: number;
-  visible?: boolean; // Nuevo campo para controlar visibilidad en UI
+  visible?: boolean; 
 }
 
 export interface SeatingGrid {
@@ -41,6 +42,7 @@ export interface SeatingGrid {
   seatSpacing: number;
   startRow: string;
   seatType: SeatType;
+  seatShape: SeatShape; // Nuevo campo para la forma
   zoneId: string;
 }
 
@@ -52,4 +54,10 @@ export type ToolType =
   | "polygon"
   | "seating-grid"
   | "text"
-  | "hand"; // Herramienta para paneo manual
+  | "hand";
+
+// Interfaz para el estado del historial
+export interface CanvasState {
+    canvasJSON: any;
+    zones: Zone[];
+}
