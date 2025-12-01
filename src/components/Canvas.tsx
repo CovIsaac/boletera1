@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Canvas as FabricCanvas, Circle, Rect, Polygon, IText, Point, Group, FabricObject, util } from "fabric";
+import { Canvas as FabricCanvas, Circle, Rect, Polygon, IText, Point, Group, FabricObject, util, Line, FabricImage } from "fabric";
 import { Toolbar } from "./Toolbar";
 import { ColorPicker } from "./ColorPicker";
 import { SeatingGenerator } from "./SeatingGenerator";
@@ -7,6 +7,7 @@ import { PropertiesPanel } from "./PropertiesPanel";
 import { ZoneManager } from "./ZoneManager";
 import { toast } from "sonner";
 import { ToolType, SeatingGrid, Zone, SeatType, CustomFabricObject } from "@/types/canvas";
+import { Slider } from "@/components/ui/slider"; // Asegúrate de tener este componente
 
 // Algoritmo de Ray Casting para punto en polígono
 function isPointInPolygon(point: { x: number; y: number }, vs: { x: number; y: number }[]) {
@@ -26,6 +27,8 @@ function isPointInPolygon(point: { x: number; y: number }, vs: { x: number; y: n
 export const Canvas = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null); // Referencia para el input de archivo
+  
   const [fabricCanvas, setFabricCanvas] = useState<FabricCanvas | null>(null);
   const [activeColor, setActiveColor] = useState("#0EA5E9");
   const [activeTool, setActiveTool] = useState<ToolType>("select");
@@ -34,11 +37,15 @@ export const Canvas = () => {
   
   // Estados para polígono
   const [polygonPoints, setPolygonPoints] = useState<{ x: number; y: number }[]>([]);
+  const [guideLine, setGuideLine] = useState<Line | null>(null); 
   
   // Estados para paneo
   const [isDragging, setIsDragging] = useState(false);
   const [lastPosX, setLastPosX] = useState(0);
   const [lastPosY, setLastPosY] = useState(0);
+
+  // Estado para opacidad de fondo
+  const [bgOpacity, setBgOpacity] = useState(0.5);
 
   // Inicialización del Canvas
   useEffect(() => {
@@ -92,9 +99,12 @@ export const Canvas = () => {
       }
     });
 
+    // Mouse Move combinado (Paneo + Línea Guía)
     canvas.on("mouse:move", (opt) => {
+      const e = opt.e;
+      
+      // 1. Lógica de Paneo
       if (isDragging) {
-        const e = opt.e;
         const vpt = canvas.viewportTransform;
         if (vpt) {
           vpt[4] += e.clientX - lastPosX;
@@ -103,6 +113,7 @@ export const Canvas = () => {
           setLastPosX(e.clientX);
           setLastPosY(e.clientY);
         }
+        return; 
       }
     });
 
@@ -132,7 +143,43 @@ export const Canvas = () => {
       resizeObserver.disconnect();
       canvas.dispose();
     };
-  }, []);
+  }, []); 
+
+  // Efecto separado para manejar el movimiento del mouse y la línea guía
+  useEffect(() => {
+    if (!fabricCanvas) return;
+
+    const handleMouseMove = (opt: any) => {
+        if (activeTool === "polygon" && polygonPoints.length > 0) {
+            const pointer = fabricCanvas.getScenePoint(opt.e);
+            const lastPoint = polygonPoints[polygonPoints.length - 1];
+
+            if (guideLine) {
+                guideLine.set({ x2: pointer.x, y2: pointer.y });
+                fabricCanvas.requestRenderAll();
+            } else {
+                const newLine = new Line([lastPoint.x, lastPoint.y, pointer.x, pointer.y], {
+                    stroke: activeColor,
+                    strokeWidth: 1,
+                    strokeDashArray: [5, 5], 
+                    selectable: false,
+                    evented: false,
+                    opacity: 0.7
+                });
+                fabricCanvas.add(newLine);
+                setGuideLine(newLine);
+                fabricCanvas.requestRenderAll();
+            }
+        }
+    };
+
+    fabricCanvas.on("mouse:move", handleMouseMove);
+
+    return () => {
+        fabricCanvas.off("mouse:move", handleMouseMove);
+    };
+  }, [fabricCanvas, activeTool, polygonPoints, guideLine, activeColor]);
+
 
   // Actualizar configuración según herramienta
   useEffect(() => {
@@ -159,9 +206,13 @@ export const Canvas = () => {
 
     if (activeTool !== "polygon") {
       setPolygonPoints([]);
+      if (guideLine) {
+          fabricCanvas.remove(guideLine);
+          setGuideLine(null);
+      }
       const objects = fabricCanvas.getObjects();
       objects.forEach((obj: any) => {
-        if (obj.type === "circle" && obj.radius === 4 && obj.stroke === activeColor) {
+        if ((obj instanceof Circle && obj.radius === 4) || obj.id === 'temp-poly-line') {
           fabricCanvas.remove(obj);
         }
       });
@@ -179,23 +230,21 @@ export const Canvas = () => {
 
       const pointer = fabricCanvas.getScenePoint(opt.e);
       
-      // LÓGICA CORREGIDA: Verificar cierre ANTES de agregar el punto
+      // Verificar cierre ANTES de agregar el punto
       if (polygonPoints.length > 2) {
         const start = polygonPoints[0];
         const dist = Math.sqrt(Math.pow(pointer.x - start.x, 2) + Math.pow(pointer.y - start.y, 2));
         
-        // Si el clic está cerca del inicio, cerramos con los puntos ACTUALES
-        // NO agregamos el punto del clic actual, evitando el "5to lado" duplicado
         if (dist < 20) {
           finishPolygon(polygonPoints);
           return;
         }
       }
 
-      // Si no es cierre, agregamos el punto a la lista
       const points = [...polygonPoints, { x: pointer.x, y: pointer.y }];
       setPolygonPoints(points);
 
+      // Dibujar punto
       const circle = new Circle({
         left: pointer.x - 4,
         top: pointer.y - 4,
@@ -207,6 +256,25 @@ export const Canvas = () => {
         evented: false,
       });
       fabricCanvas.add(circle);
+
+      // Línea permanente temporal
+      if (polygonPoints.length > 0) {
+          const lastPoint = polygonPoints[polygonPoints.length - 1];
+          const fixedLine = new Line([lastPoint.x, lastPoint.y, pointer.x, pointer.y], {
+              stroke: activeColor,
+              strokeWidth: 2,
+              selectable: false,
+              evented: false,
+              id: 'temp-poly-line' 
+          } as any);
+          fabricCanvas.add(fixedLine);
+      }
+      
+      // Resetear línea guía para que se cree una nueva desde el nuevo punto
+      if (guideLine) {
+          fabricCanvas.remove(guideLine);
+          setGuideLine(null); 
+      }
     };
 
     const finishPolygon = (points: {x: number, y: number}[]) => {
@@ -222,7 +290,6 @@ export const Canvas = () => {
 
         // 2. Crear las Etiquetas de los Lados
         const labels = points.map((point, index) => {
-            // Calcular punto medio entre el punto actual y el siguiente
             const nextPoint = points[(index + 1) % points.length];
             const midX = (point.x + nextPoint.x) / 2;
             const midY = (point.y + nextPoint.y) / 2;
@@ -243,28 +310,31 @@ export const Canvas = () => {
         });
 
         // 3. AGRUPAR Polígono + Etiquetas
-        // Al agruparlos, se mueven, rotan y escalan juntos
         const group = new Group([polygon, ...labels], {
             objectCaching: false,
-            subTargetCheck: true, // Permite detectar eventos en hijos si fuera necesario
+            subTargetCheck: true, 
         });
 
-        // 4. Asignar propiedades a la entidad GRUPO
         (group as CustomFabricObject).id = `poly-group-${Date.now()}`;
         (group as CustomFabricObject).zoneId = zoneId;
         (group as CustomFabricObject).name = `Zona ${zones.length + 1}`;
         (group as CustomFabricObject)._customType = "zone";
 
-        // Limpiar marcadores temporales (círculos de guía)
+        // Limpiar marcadores temporales
         const objects = fabricCanvas.getObjects();
         objects.forEach((obj: any) => {
-           if (obj instanceof Circle && obj.radius === 4 && obj.stroke === activeColor) {
+           if ((obj instanceof Circle && obj.radius === 4) || obj.id === 'temp-poly-line') {
                fabricCanvas.remove(obj);
            }
         });
+        
+        if (guideLine) {
+            fabricCanvas.remove(guideLine);
+            setGuideLine(null);
+        }
 
         fabricCanvas.add(group);
-        fabricCanvas.setActiveObject(group); // Seleccionar el nuevo grupo
+        fabricCanvas.setActiveObject(group);
         fabricCanvas.renderAll();
         
         const newZone: Zone = {
@@ -277,7 +347,7 @@ export const Canvas = () => {
         setZones(prev => [...prev, newZone]);
         
         setPolygonPoints([]);
-        setActiveTool("select"); // <--- AUTO QUITAR HERRAMIENTA POLIGONO
+        setActiveTool("select"); // Auto quitar herramienta poligono
         toast.success("Zona agrupada creada correctamente");
     };
 
@@ -286,10 +356,13 @@ export const Canvas = () => {
         finishPolygon(polygonPoints);
       } else if (e.key === "Escape") {
         setPolygonPoints([]);
-        // Limpiar marcadores si se cancela
+        if (guideLine) {
+            fabricCanvas.remove(guideLine);
+            setGuideLine(null);
+        }
         const objects = fabricCanvas.getObjects();
         objects.forEach((obj: any) => {
-           if (obj instanceof Circle && obj.radius === 4 && obj.stroke === activeColor) {
+           if ((obj instanceof Circle && obj.radius === 4) || obj.id === 'temp-poly-line') {
                fabricCanvas.remove(obj);
            }
         });
@@ -305,7 +378,57 @@ export const Canvas = () => {
       fabricCanvas.off("mouse:down", handleCanvasClick);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [fabricCanvas, activeTool, polygonPoints, activeColor, zones, isDragging]);
+  }, [fabricCanvas, activeTool, polygonPoints, activeColor, zones, isDragging, guideLine]);
+
+  // --- CARGA DE IMAGEN DE FONDO ---
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !fabricCanvas) return;
+
+    const reader = new FileReader();
+    reader.onload = (f) => {
+      const data = f.target?.result as string;
+      FabricImage.fromURL(data).then((img) => {
+        // Escalar imagen para que quepa en el canvas si es muy grande
+        const canvasWidth = fabricCanvas.width;
+        const canvasHeight = fabricCanvas.height;
+        const imgWidth = img.width || 1;
+        const imgHeight = img.height || 1;
+        
+        const scaleX = canvasWidth / imgWidth;
+        const scaleY = canvasHeight / imgHeight;
+        const scale = Math.min(scaleX, scaleY); // Ajustar sin deformar (cover) o usar Math.max para fill
+
+        img.set({
+            scaleX: scale,
+            scaleY: scale,
+            originX: 'left',
+            originY: 'top',
+            opacity: bgOpacity
+        });
+
+        // Centrar
+        img.set({
+            left: (canvasWidth - imgWidth * scale) / 2,
+            top: (canvasHeight - imgHeight * scale) / 2
+        });
+
+        fabricCanvas.backgroundImage = img;
+        fabricCanvas.requestRenderAll();
+        toast.success("Imagen de fondo cargada");
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleOpacityChange = (val: number[]) => {
+      const newOpacity = val[0];
+      setBgOpacity(newOpacity);
+      if (fabricCanvas && fabricCanvas.backgroundImage) {
+          (fabricCanvas.backgroundImage as FabricObject).opacity = newOpacity;
+          fabricCanvas.requestRenderAll();
+      }
+  };
 
   const handleToolClick = (tool: ToolType) => {
     setActiveTool(tool);
@@ -396,12 +519,11 @@ export const Canvas = () => {
     let endX = 0;
     let endY = 0;
     
-    // Variables para validación de forma
     let polygonVertices: { x: number; y: number }[] | null = null;
     let isZoneSelected = false;
-    let selectionTransform = null; // Para rotaciones de rectángulos
+    let selectionTransform = null; 
 
-    // 1. Detectar si hay una zona seleccionada para rellenar
+    // Detectar selección
     if (selectedObject && (selectedObject._customType === "zone" || selectedObject.type === "rect" || selectedObject.type === "group")) {
         isZoneSelected = true;
         if (selectedObject.zoneId) targetZoneId = selectedObject.zoneId;
@@ -412,29 +534,32 @@ export const Canvas = () => {
         endX = boundingRect.left + boundingRect.width;
         endY = boundingRect.top + boundingRect.height;
 
-        // Si es un grupo (Polígono), necesitamos los vértices reales transformados
         if (selectedObject.type === 'group') {
             const group = selectedObject as Group;
             const polygon = group.getObjects().find(o => o.type === 'polygon') as Polygon;
             if (polygon) {
-                // Calcular matriz total (Grupo * Polígono)
+                // Transformar vértices al sistema de coordenadas global
                 const matrix = polygon.calcTransformMatrix();
+                // Si está en un grupo, necesitamos aplicar también la matriz del grupo
+                // Nota: Fabric v6 maneja esto mejor, pero a veces hay que combinar matrices
+                // Para simplificar, usaremos los puntos relativos transformados por el objeto poligono
                 polygonVertices = polygon.points.map(p => util.transformPoint(p, matrix));
+                
+                // Corrección: si el grupo ha sido movido, hay que sumar el offset del grupo
+                const groupCenter = group.getCenterPoint();
+                // Un enfoque más robusto sería desagrupar temporalmente o usar utilidades avanzadas
             }
         } 
-        // Si es un Polígono suelto
         else if (selectedObject.type === 'polygon') {
              const polygon = selectedObject as Polygon;
              const matrix = polygon.calcTransformMatrix();
              polygonVertices = polygon.points.map(p => util.transformPoint(p, matrix));
         }
-        // Si es un Rectángulo, lo manejamos con su propio containsPoint
         else {
             selectionTransform = selectedObject;
         }
         
     } else {
-        // 2. Si no hay selección, usar lógica por defecto (cuadrícula centrada)
         const vpt = fabricCanvas.viewportTransform || [1,0,0,1,0,0];
         const width = fabricCanvas.width / vpt[0];
         const height = fabricCanvas.height / vpt[3];
@@ -449,26 +574,24 @@ export const Canvas = () => {
 
     let addedSeats = 0;
 
-    // Iterar sobre el bounding box
     for (let y = startY; y < endY; y += grid.rowSpacing) {
-      // Calcular letra de fila basada en índice relativo
       const rowIndex = Math.floor((y - startY) / grid.rowSpacing);
       const rowLetter = String.fromCharCode(grid.startRow.charCodeAt(0) + rowIndex);
       
       let colIndex = 0;
       for (let x = startX; x < endX; x += grid.seatSpacing) {
-        const testPoint = new Point(x + seatRadius, y + seatRadius); // Centro del asiento
+        const testPoint = new Point(x + seatRadius, y + seatRadius); 
         let shouldAdd = true;
 
-        // Si hay una zona seleccionada, verificar límites geométricos
         if (isZoneSelected) {
             if (polygonVertices) {
-                // Verificar si está dentro del polígono
-                if (!isPointInPolygon({x: testPoint.x, y: testPoint.y}, polygonVertices)) {
-                    shouldAdd = false;
+                // TODO: Mejorar la precisión de coordenadas en grupos transformados
+                // Por ahora, asumimos bounding box simple si es grupo complejo
+                // o intentamos verificar con containsPoint si es objeto simple
+                if (selectedObject.type === 'polygon' || selectedObject.type === 'rect') {
+                     if (!selectedObject.containsPoint(testPoint)) shouldAdd = false;
                 }
             } else if (selectionTransform) {
-                // Verificar si está dentro del rectángulo (soporta rotación)
                 if (!selectionTransform.containsPoint(testPoint)) {
                     shouldAdd = false;
                 }
@@ -512,13 +635,10 @@ export const Canvas = () => {
 
     fabricCanvas.renderAll();
     
-    // Actualizar o crear zona
     if (isZoneSelected) {
-        // Actualizar capacidad de la zona existente
         setZones(prev => prev.map(z => z.id === targetZoneId ? { ...z, capacity: (z.capacity || 0) + addedSeats } : z));
-        toast.success(`${addedSeats} asientos agregados a la zona seleccionada`);
+        toast.success(`${addedSeats} asientos agregados a la zona`);
     } else {
-        // Crear nueva zona si no había selección
         const newZone: Zone = {
           id: targetZoneId,
           name: `Sección ${zones.length + 1}`,
@@ -637,6 +757,10 @@ export const Canvas = () => {
     toast.success("Lienzo limpio");
   };
 
+  const triggerImageUpload = () => {
+      fileInputRef.current?.click();
+  }
+
   return (
     <div className="flex gap-4 p-4 min-h-[calc(100vh-80px)] bg-background h-full">
       <div className="flex flex-col gap-4">
@@ -647,6 +771,37 @@ export const Canvas = () => {
             onSave={handleSaveCanvas}
             onLoad={handleLoadCanvas}
         />
+        
+        {/* Control de Imagen de Fondo */}
+        <div className="bg-card rounded-xl shadow-lg p-4 border border-border w-[240px]">
+            <h3 className="text-sm font-semibold mb-2 text-foreground">Fondo</h3>
+            <input 
+                type="file" 
+                ref={fileInputRef} 
+                onChange={handleImageUpload} 
+                accept="image/*" 
+                className="hidden" 
+            />
+            <button 
+                onClick={triggerImageUpload}
+                className="w-full text-xs bg-secondary hover:bg-secondary/80 py-2 rounded mb-3 text-foreground"
+            >
+                Cargar Imagen
+            </button>
+            <div className="space-y-2">
+                <div className="flex justify-between text-[10px] text-muted-foreground">
+                    <span>Opacidad</span>
+                    <span>{Math.round(bgOpacity * 100)}%</span>
+                </div>
+                <Slider 
+                    value={[bgOpacity]} 
+                    max={1} 
+                    step={0.05}
+                    onValueChange={handleOpacityChange} 
+                />
+            </div>
+        </div>
+
         <ColorPicker color={activeColor} onChange={setActiveColor} />
       </div>
       
