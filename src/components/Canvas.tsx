@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Canvas as FabricCanvas, Circle, Rect, Polygon, IText, Point, Group, FabricObject, util, Line, FabricImage, ActiveSelection } from "fabric";
+import { Canvas as FabricCanvas, Circle, Rect, Polygon, IText, Point, Group, FabricObject, util, Line, FabricImage, ActiveSelection, Path } from "fabric";
 import { Toolbar } from "./Toolbar";
 import { ColorPicker } from "./ColorPicker";
 import { SeatingGenerator } from "./SeatingGenerator";
@@ -8,9 +8,12 @@ import { ZoneManager } from "./ZoneManager";
 import { toast } from "sonner";
 import { ToolType, SeatingGrid, Zone, SeatType, CustomFabricObject, CanvasState } from "@/types/canvas";
 import { Slider } from "@/components/ui/slider";
+import { ZoomIn, ZoomOut, Maximize } from "lucide-react";
+import { Button } from "./ui/button";
 
 // Constantes para Snapping
 const SNAP_THRESHOLD = 15;
+const GRID_SIZE = 40; 
 
 function isPointInPolygon(point: { x: number; y: number }, vs: { x: number; y: number }[]) {
     let x = point.x, y = point.y;
@@ -46,6 +49,8 @@ export const Canvas = () => {
   const [lastPosY, setLastPosY] = useState(0);
 
   const [bgOpacity, setBgOpacity] = useState(0.5);
+  const [showGrid, setShowGrid] = useState(true);
+  const [zoomLevel, setZoomLevel] = useState(1); 
 
   const [history, setHistory] = useState<CanvasState[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -54,7 +59,7 @@ export const Canvas = () => {
   const saveHistory = useCallback(() => {
       if (!fabricCanvas || isHistoryLocked.current) return;
       
-      const json = fabricCanvas.toJSON(['id', 'name', 'price', 'capacity', 'zoneId', '_customType']);
+      const json = fabricCanvas.toJSON(['id', 'name', 'price', 'capacity', 'zoneId', '_customType', 'lockMovementX', 'lockMovementY', 'lockScalingX', 'lockScalingY', 'lockRotation', 'hasControls', 'selectable']);
       const currentState: CanvasState = {
           canvasJSON: json,
           zones: [...zones] 
@@ -69,6 +74,7 @@ export const Canvas = () => {
       setHistoryIndex(prev => Math.min(prev + 1, 49)); 
   }, [fabricCanvas, zones, historyIndex]);
 
+  // Inicialización del Canvas
   useEffect(() => {
     if (!canvasRef.current || !containerRef.current) return;
 
@@ -101,6 +107,7 @@ export const Canvas = () => {
       if (zoom > 20) zoom = 20;
       if (zoom < 0.01) zoom = 0.01;
       canvas.zoomToPoint(new Point(opt.e.offsetX, opt.e.offsetY), zoom);
+      setZoomLevel(zoom);
       opt.e.preventDefault();
       opt.e.stopPropagation();
     });
@@ -117,6 +124,7 @@ export const Canvas = () => {
 
     canvas.on("object:modified", () => saveHistory());
     
+    // Snapping Logic
     canvas.on('object:moving', (options) => {
         const target = options.target;
         if (!target) return;
@@ -138,7 +146,7 @@ export const Canvas = () => {
         };
 
         canvas.getObjects().forEach((obj: any) => {
-            if (obj === target || obj._customType === 'guide' || !obj.visible) return;
+            if (obj === target || obj._customType === 'guide' || obj._customType === 'grid' || !obj.visible) return;
 
             const objW = obj.width * obj.scaleX;
             const objH = obj.height * obj.scaleY;
@@ -221,6 +229,7 @@ export const Canvas = () => {
           width: containerRef.current.clientWidth,
           height: containerRef.current.clientHeight,
         });
+        if(showGrid) drawGridLines(canvas);
         canvas.renderAll();
       }
     });
@@ -232,6 +241,67 @@ export const Canvas = () => {
     };
   }, []); 
 
+  // Grid Logic
+  const drawGridLines = (canvas: FabricCanvas) => {
+      canvas.getObjects().forEach((obj: any) => {
+          if (obj._customType === 'grid') canvas.remove(obj);
+      });
+
+      if (!showGrid) {
+          canvas.requestRenderAll();
+          return;
+      }
+
+      const width = canvas.width;
+      const height = canvas.height;
+      const gridColor = "#e2e8f0";
+
+      for (let i = 0; i < (width / GRID_SIZE); i++) {
+          const line = new Line([i * GRID_SIZE, 0, i * GRID_SIZE, height], {
+              stroke: gridColor,
+              selectable: false,
+              evented: false,
+              strokeWidth: 1,
+              excludeFromExport: true
+          });
+          (line as CustomFabricObject)._customType = 'grid';
+          canvas.add(line);
+          canvas.sendObjectToBack(line); 
+      }
+
+      for (let i = 0; i < (height / GRID_SIZE); i++) {
+          const line = new Line([0, i * GRID_SIZE, width, i * GRID_SIZE], {
+              stroke: gridColor,
+              selectable: false,
+              evented: false,
+              strokeWidth: 1,
+              excludeFromExport: true
+          });
+          (line as CustomFabricObject)._customType = 'grid';
+          canvas.add(line);
+          canvas.sendObjectToBack(line); 
+      }
+  };
+
+  useEffect(() => {
+      if(fabricCanvas) {
+          drawGridLines(fabricCanvas);
+          fabricCanvas.requestRenderAll();
+      }
+  }, [fabricCanvas, showGrid]); 
+
+  // Drawing Mode Effect
+  useEffect(() => {
+    if (!fabricCanvas) return;
+    fabricCanvas.isDrawingMode = activeTool === "draw";
+    if (activeTool === "draw" && fabricCanvas.freeDrawingBrush) {
+        fabricCanvas.freeDrawingBrush.color = activeColor;
+        fabricCanvas.freeDrawingBrush.width = 3;
+    }
+    fabricCanvas.requestRenderAll();
+  }, [activeTool, fabricCanvas, activeColor]);
+
+  // Polygon Line Guide Effect
   useEffect(() => {
     if (!fabricCanvas) return;
     const handleMouseMove = (opt: any) => {
@@ -255,20 +325,36 @@ export const Canvas = () => {
     return () => { fabricCanvas.off("mouse:move", handleMouseMove); };
   }, [fabricCanvas, activeTool, polygonPoints, guideLine, activeColor]);
 
+  // Polygon & Keyboard Logic (Incluye Atajos de teclado)
   useEffect(() => {
-    if (!fabricCanvas || activeTool !== "polygon") return;
+    if (!fabricCanvas) return;
+
     const handleCanvasClick = (opt: any) => {
+      if (activeTool !== "polygon") return;
       if (isDragging || opt.e.altKey) return;
+      
       const pointer = fabricCanvas.getScenePoint(opt.e);
       if (polygonPoints.length > 2) {
         const start = polygonPoints[0];
         const dist = Math.sqrt(Math.pow(pointer.x - start.x, 2) + Math.pow(pointer.y - start.y, 2));
         if (dist < 20) { finishPolygon(polygonPoints); return; }
       }
+
+      if (polygonPoints.length > 0) {
+          const lastPoint = polygonPoints[polygonPoints.length - 1];
+          const line = new Line([lastPoint.x, lastPoint.y, pointer.x, pointer.y], {
+              stroke: activeColor, strokeWidth: 2, selectable: false, evented: false
+          });
+          (line as any).id = 'temp-poly-line'; 
+          fabricCanvas.add(line);
+      }
+
       const points = [...polygonPoints, { x: pointer.x, y: pointer.y }];
       setPolygonPoints(points);
+      
       const circle = new Circle({ left: pointer.x - 4, top: pointer.y - 4, radius: 4, fill: "transparent", stroke: activeColor, strokeWidth: 2, selectable: false, evented: false });
       fabricCanvas.add(circle);
+      
       if (guideLine) { fabricCanvas.remove(guideLine); setGuideLine(null); }
     };
 
@@ -286,10 +372,12 @@ export const Canvas = () => {
         (group as CustomFabricObject).zoneId = zoneId;
         (group as CustomFabricObject).name = `Zona ${zones.length + 1}`;
         (group as CustomFabricObject)._customType = "zone";
+        
         const objects = fabricCanvas.getObjects();
         objects.forEach((obj: any) => {
            if ((obj instanceof Circle && obj.radius === 4) || obj.id === 'temp-poly-line') fabricCanvas.remove(obj);
         });
+        
         if (guideLine) { fabricCanvas.remove(guideLine); setGuideLine(null); }
         fabricCanvas.add(group);
         fabricCanvas.setActiveObject(group);
@@ -300,21 +388,69 @@ export const Canvas = () => {
         toast.success("Zona creada");
         saveHistory();
     };
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Enter" && polygonPoints.length >= 3) finishPolygon(polygonPoints);
-      else if (e.key === "Escape") {
-        setPolygonPoints([]);
-        if (guideLine) { fabricCanvas.remove(guideLine); setGuideLine(null); }
-        const objects = fabricCanvas.getObjects();
-        objects.forEach((obj: any) => { if ((obj instanceof Circle && obj.radius === 4)) fabricCanvas.remove(obj); });
-        fabricCanvas.requestRenderAll();
-        toast.info("Polígono cancelado");
+      // 1. Polígono
+      if (activeTool === "polygon") {
+          if (e.key === "Enter" && polygonPoints.length >= 3) finishPolygon(polygonPoints);
+          else if (e.key === "Escape") {
+            setPolygonPoints([]);
+            if (guideLine) { fabricCanvas.remove(guideLine); setGuideLine(null); }
+            const objects = fabricCanvas.getObjects();
+            objects.forEach((obj: any) => { 
+                if ((obj instanceof Circle && obj.radius === 4) || obj.id === 'temp-poly-line') fabricCanvas.remove(obj); 
+            });
+            fabricCanvas.requestRenderAll();
+            toast.info("Polígono cancelado");
+          }
+      }
+
+      // 2. Borrar (Delete/Backspace)
+      if (e.key === "Delete" || e.key === "Backspace") {
+          const activeObjects = fabricCanvas.getActiveObjects();
+          if (activeObjects.length > 0 && !(activeObjects[0] as any).isEditing) {
+              activeObjects.forEach(obj => fabricCanvas.remove(obj));
+              fabricCanvas.discardActiveObject();
+              fabricCanvas.requestRenderAll();
+              
+              const deletedZoneIds = activeObjects
+                  .filter((o: any) => o._customType === 'zone')
+                  .map((o: any) => o.zoneId);
+              
+              if (deletedZoneIds.length > 0) {
+                  setZones(prev => prev.filter(z => !deletedZoneIds.includes(z.id)));
+              }
+              toast.success("Elementos eliminados");
+              saveHistory();
+          }
+      }
+
+      // 3. Atajos de Teclado (Ctrl+Z, Ctrl+Y, Ctrl+D)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+          e.preventDefault();
+          if (e.shiftKey) handleRedo();
+          else handleUndo();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+          e.preventDefault();
+          handleRedo();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+          e.preventDefault();
+          handleDuplicate();
       }
     };
-    fabricCanvas.on("mouse:down", handleCanvasClick);
+    
+    if (activeTool === "polygon") {
+        fabricCanvas.on("mouse:down", handleCanvasClick);
+    }
+    
     window.addEventListener("keydown", handleKeyDown);
-    return () => { fabricCanvas.off("mouse:down", handleCanvasClick); window.removeEventListener("keydown", handleKeyDown); };
-  }, [fabricCanvas, activeTool, polygonPoints, activeColor, zones, isDragging, guideLine, saveHistory]);
+    return () => { 
+        fabricCanvas.off("mouse:down", handleCanvasClick); 
+        window.removeEventListener("keydown", handleKeyDown); 
+    };
+  }, [fabricCanvas, activeTool, polygonPoints, activeColor, zones, isDragging, guideLine, saveHistory, historyIndex, history]); // Dependencias importantes para Undo/Redo en callback
 
   const handleDuplicate = useCallback(() => {
     if (!fabricCanvas) return;
@@ -383,6 +519,8 @@ export const Canvas = () => {
       const prevState = history[prevIndex];
       fabricCanvas.loadFromJSON(prevState.canvasJSON, () => {
           fabricCanvas.requestRenderAll();
+          if(showGrid) drawGridLines(fabricCanvas);
+          
           setZones(prevState.zones);
           setHistoryIndex(prevIndex);
           isHistoryLocked.current = false;
@@ -397,6 +535,8 @@ export const Canvas = () => {
       const nextState = history[nextIndex];
       fabricCanvas.loadFromJSON(nextState.canvasJSON, () => {
           fabricCanvas.requestRenderAll();
+          if(showGrid) drawGridLines(fabricCanvas);
+
           setZones(nextState.zones);
           setHistoryIndex(nextIndex);
           isHistoryLocked.current = false;
@@ -409,11 +549,17 @@ export const Canvas = () => {
     const objects = fabricCanvas.getObjects() as CustomFabricObject[];
     const zoneObjects = objects.filter(obj => obj.zoneId === zoneId);
     zoneObjects.forEach(obj => {
-        if (direction === 'top') obj.bringToFront();
-        if (direction === 'bottom') obj.sendToBack();
-        if (direction === 'up') obj.bringForward();
-        if (direction === 'down') obj.sendBackwards();
+        if (direction === 'top') fabricCanvas.bringObjectToFront(obj);
+        if (direction === 'bottom') fabricCanvas.sendObjectToBack(obj);
+        if (direction === 'up') fabricCanvas.bringObjectForward(obj);
+        if (direction === 'down') fabricCanvas.sendObjectBackwards(obj);
     });
+    
+    if (direction === 'bottom') {
+        const gridLines = objects.filter(o => o._customType === 'grid');
+        gridLines.forEach(l => fabricCanvas.sendObjectToBack(l));
+    }
+    
     fabricCanvas.requestRenderAll();
     saveHistory();
   };
@@ -441,9 +587,65 @@ export const Canvas = () => {
     saveHistory();
   };
 
+  // --- Nueva Función: Alineación ---
+  const handleAlign = (direction: 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom') => {
+      if (!fabricCanvas) return;
+      const activeObj = fabricCanvas.getActiveObject();
+      if (!activeObj || activeObj.type !== 'activeSelection') return;
+
+      const selection = activeObj as ActiveSelection;
+      const objects = selection.getObjects();
+      
+      // Para alinear correctamente en Fabric, una técnica fiable es deshacer la selección,
+      // alinear los objetos individualmente usando sus coordenadas absolutas, y volver a seleccionar.
+      
+      const selectionRect = selection.getBoundingRect();
+      
+      fabricCanvas.discardActiveObject(); // Soltamos para trabajar con coords absolutas
+
+      objects.forEach(obj => {
+          const objRect = obj.getBoundingRect();
+          const objWidth = objRect.width;
+          const objHeight = objRect.height;
+
+          switch (direction) {
+              case 'left':
+                  obj.set('left', selectionRect.left);
+                  break;
+              case 'center':
+                  obj.set('left', selectionRect.left + (selectionRect.width / 2) - (objWidth / 2));
+                  break;
+              case 'right':
+                  obj.set('left', selectionRect.left + selectionRect.width - objWidth);
+                  break;
+              case 'top':
+                  obj.set('top', selectionRect.top);
+                  break;
+              case 'middle':
+                  obj.set('top', selectionRect.top + (selectionRect.height / 2) - (objHeight / 2));
+                  break;
+              case 'bottom':
+                  obj.set('top', selectionRect.top + selectionRect.height - objHeight);
+                  break;
+          }
+          obj.setCoords(); // Importante actualizar coords
+      });
+
+      // Volver a seleccionar
+      const newSelection = new ActiveSelection(objects, { canvas: fabricCanvas });
+      fabricCanvas.setActiveObject(newSelection);
+      fabricCanvas.requestRenderAll();
+      saveHistory();
+      toast.success("Objetos alineados");
+  };
+
   const handleToolClick = (tool: ToolType) => {
     setActiveTool(tool);
     if (!fabricCanvas) return;
+
+    if (tool !== "draw") {
+        fabricCanvas.isDrawingMode = false;
+    }
 
     const center = fabricCanvas.getCenterPoint();
     const vpt = fabricCanvas.viewportTransform || [1,0,0,1,0,0];
@@ -451,15 +653,27 @@ export const Canvas = () => {
 
     if (tool === "rectangle") {
       const zoneId = `zone-${Date.now()}`;
-      const rect = new Rect({ left: realCenter.x - 50, top: realCenter.y - 50, fill: activeColor + "80", width: 100, height: 100, stroke: activeColor, strokeWidth: 2 });
+      const rect = new Rect({ 
+          left: realCenter.x - 50, 
+          top: realCenter.y - 50, 
+          fill: activeColor + "80", 
+          width: 100, 
+          height: 100, 
+          stroke: activeColor, 
+          strokeWidth: 2 
+      });
       (rect as CustomFabricObject).id = `rect-${Date.now()}`;
       (rect as CustomFabricObject).zoneId = zoneId;
       (rect as CustomFabricObject).name = `Rectángulo ${zones.length + 1}`;
       (rect as CustomFabricObject)._customType = "zone";
+      
       fabricCanvas.add(rect);
+      fabricCanvas.setActiveObject(rect); 
       
       setZones([...zones, { id: zoneId, name: `Zona ${zones.length + 1}`, color: activeColor, type: "section", visible: true }]);
       setActiveTool("select");
+      
+      fabricCanvas.requestRenderAll(); 
       toast.success("Zona rectangular agregada");
       saveHistory();
     } 
@@ -473,9 +687,14 @@ export const Canvas = () => {
         strokeWidth: 2,
       });
       (circle as CustomFabricObject)._customType = "seat";
+      
       fabricCanvas.add(circle);
+      fabricCanvas.setActiveObject(circle);
       setActiveTool("select");
+      
+      fabricCanvas.requestRenderAll();
       toast.success("Asiento individual agregado");
+      saveHistory();
     } 
     else if (tool === "text") {
       const text = new IText("Etiqueta", {
@@ -486,9 +705,14 @@ export const Canvas = () => {
         fontFamily: "Arial",
       });
       (text as CustomFabricObject)._customType = "text";
+      
       fabricCanvas.add(text);
+      fabricCanvas.setActiveObject(text);
       setActiveTool("select");
+      
+      fabricCanvas.requestRenderAll();
       toast.success("Texto agregado");
+      saveHistory();
     }
   };
 
@@ -506,13 +730,16 @@ export const Canvas = () => {
 
     let targetZoneId = grid.zoneId;
     let startX = 0, startY = 0, endX = 0, endY = 0;
+    
     let polygonVertices: { x: number; y: number }[] | null = null;
+    let selectionTransform: FabricObject | null = null; 
+    let pathObject: Path | null = null;
+
     let isZoneSelected = false;
-    let selectionTransform = null; 
     
     const targetObj = selectedObjects.length > 0 ? selectedObjects[0] : null;
 
-    if (targetObj && (targetObj._customType === "zone" || targetObj.type === "rect" || targetObj.type === "group")) {
+    if (targetObj && (targetObj._customType === "zone" || targetObj.type === "rect" || targetObj.type === "group" || targetObj.type === "path")) {
         isZoneSelected = true;
         if (targetObj.zoneId) targetZoneId = targetObj.zoneId;
         const br = targetObj.getBoundingRect();
@@ -524,12 +751,18 @@ export const Canvas = () => {
             if (polygon) {
                 const matrix = polygon.calcTransformMatrix();
                 polygonVertices = polygon.points.map(p => util.transformPoint(p, matrix));
+            } else {
+                selectionTransform = targetObj;
             }
         } else if (targetObj.type === 'polygon') {
             const polygon = targetObj as Polygon;
             const matrix = polygon.calcTransformMatrix();
             polygonVertices = polygon.points.map(p => util.transformPoint(p, matrix));
-        } else { selectionTransform = targetObj; }
+        } else if (targetObj.type === 'path') {
+            pathObject = targetObj as Path;
+        } else { 
+            selectionTransform = targetObj; 
+        }
     } else {
         const vpt = fabricCanvas.viewportTransform || [1,0,0,1,0,0];
         const width = fabricCanvas.width / vpt[0];
@@ -557,6 +790,8 @@ export const Canvas = () => {
         if (isZoneSelected) {
             if (polygonVertices) {
                 if (!isPointInPolygon({x: testPoint.x, y: testPoint.y}, polygonVertices)) shouldAdd = false;
+            } else if (pathObject) {
+                if (!pathObject.containsPoint(testPoint)) shouldAdd = false;
             } else if (selectionTransform) {
                 if (!selectionTransform.containsPoint(testPoint)) shouldAdd = false;
             }
@@ -592,6 +827,8 @@ export const Canvas = () => {
             
             fabricCanvas.add(seatObject);
             fabricCanvas.add(seatNumber);
+            fabricCanvas.bringObjectToFront(seatObject); 
+            fabricCanvas.bringObjectToFront(seatNumber);
             addedSeats++;
         }
       }
@@ -629,6 +866,7 @@ export const Canvas = () => {
         img.set({ scaleX: scale, scaleY: scale, originX: 'left', originY: 'top', opacity: bgOpacity });
         img.set({ left: (fabricCanvas.width - (img.width||0)*scale)/2, top: (fabricCanvas.height - (img.height||0)*scale)/2 });
         fabricCanvas.backgroundImage = img;
+        
         fabricCanvas.requestRenderAll();
         toast.success("Fondo cargado");
         saveHistory();
@@ -684,7 +922,7 @@ export const Canvas = () => {
 
   const handleSaveCanvas = () => {
     if (!fabricCanvas) return;
-    const json = fabricCanvas.toJSON(['id', 'name', 'price', 'capacity', 'zoneId', '_customType']);
+    const json = fabricCanvas.toJSON(['id', 'name', 'price', 'capacity', 'zoneId', '_customType', 'lockMovementX', 'lockMovementY', 'lockScalingX', 'lockScalingY', 'lockRotation', 'hasControls', 'selectable']);
     const dataToSave = {
         canvas: json,
         zones: zones
@@ -700,6 +938,8 @@ export const Canvas = () => {
     const parsed = JSON.parse(savedData);
     fabricCanvas.loadFromJSON(parsed.canvas, () => {
         fabricCanvas.requestRenderAll();
+        if(showGrid) drawGridLines(fabricCanvas);
+        
         setZones(parsed.zones || []);
         toast.success("Mapa cargado");
         saveHistory();
@@ -710,10 +950,48 @@ export const Canvas = () => {
     if (!fabricCanvas) return;
     fabricCanvas.clear();
     fabricCanvas.backgroundColor = "#f8fafc";
+    
+    // Restaurar grid
+    if(showGrid) drawGridLines(fabricCanvas);
+    
     fabricCanvas.requestRenderAll();
     setZones([]);
     toast.success("Lienzo limpio");
     saveHistory();
+  };
+
+  // --- Funciones de Exportación ---
+  const handleExportImage = () => {
+    if (!fabricCanvas) return;
+    fabricCanvas.discardActiveObject();
+    fabricCanvas.requestRenderAll();
+
+    const dataURL = fabricCanvas.toDataURL({
+        format: 'png',
+        quality: 1,
+        multiplier: 2 // Alta calidad
+    });
+
+    const link = document.createElement('a');
+    link.download = `mapa-asientos-${Date.now()}.png`;
+    link.href = dataURL;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    toast.success("Imagen exportada");
+  };
+
+  const handleExportJSON = () => {
+    if (!fabricCanvas) return;
+    const json = fabricCanvas.toJSON(['id', 'name', 'price', 'capacity', 'zoneId', '_customType', 'lockMovementX', 'lockMovementY', 'lockScalingX', 'lockScalingY', 'lockRotation', 'hasControls', 'selectable']);
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify({ canvas: json, zones }));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataStr);
+    downloadAnchorNode.setAttribute("download", `mapa-${Date.now()}.json`);
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+    toast.success("Archivo JSON exportado");
   };
 
   return (
@@ -728,12 +1006,24 @@ export const Canvas = () => {
             onUndo={handleUndo}
             onRedo={handleRedo}
             onDuplicate={handleDuplicate}
+            onExportImage={handleExportImage}
+            onExportJSON={handleExportJSON}
             canUndo={historyIndex > 0}
             canRedo={historyIndex < history.length - 1}
         />
         
         <div className="bg-card rounded-xl shadow-lg p-4 border border-border w-[240px]">
-            <h3 className="text-sm font-semibold mb-2 text-foreground">Fondo</h3>
+            <h3 className="text-sm font-semibold mb-2 text-foreground">Fondo y Vista</h3>
+            <div className="flex items-center gap-2 mb-3">
+               <input 
+                  type="checkbox" 
+                  id="showGrid"
+                  checked={showGrid}
+                  onChange={(e) => setShowGrid(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+               />
+               <label htmlFor="showGrid" className="text-xs text-foreground cursor-pointer select-none">Mostrar Cuadrícula</label>
+            </div>
             <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
             <button onClick={() => fileInputRef.current?.click()} className="w-full text-xs bg-secondary hover:bg-secondary/80 py-2 rounded mb-3 text-foreground">Cargar Imagen</button>
             <Slider value={[bgOpacity]} max={1} step={0.05} onValueChange={handleOpacityChange} />
@@ -744,14 +1034,70 @@ export const Canvas = () => {
       
       <div className="flex-1 bg-card rounded-xl shadow-lg overflow-hidden border border-border relative" ref={containerRef}>
         <canvas ref={canvasRef} />
-        <div className="absolute bottom-4 right-4 bg-white/80 px-2 py-1 rounded text-xs pointer-events-none">
-            Zoom: {(fabricCanvas?.getZoom() || 1).toFixed(2)}x
+        
+        {/* Controles de Zoom Flotantes */}
+        <div className="absolute bottom-4 right-4 flex gap-2">
+            <div className="bg-card border border-border rounded-lg shadow-sm flex items-center p-1 gap-1">
+                <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    className="h-8 w-8" 
+                    onClick={() => {
+                        if (!fabricCanvas) return;
+                        let zoom = fabricCanvas.getZoom() * 0.9;
+                        if (zoom < 0.01) zoom = 0.01;
+                        fabricCanvas.zoomToPoint(new Point(fabricCanvas.width / 2, fabricCanvas.height / 2), zoom);
+                        setZoomLevel(zoom);
+                        fabricCanvas.requestRenderAll();
+                    }}
+                    title="Alejar"
+                >
+                    <ZoomOut className="h-4 w-4" />
+                </Button>
+                
+                <span className="text-xs font-mono w-12 text-center select-none">
+                    {Math.round(zoomLevel * 100)}%
+                </span>
+
+                <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    className="h-8 w-8" 
+                    onClick={() => {
+                        if (!fabricCanvas) return;
+                        let zoom = fabricCanvas.getZoom() * 1.1;
+                        if (zoom > 20) zoom = 20;
+                        fabricCanvas.zoomToPoint(new Point(fabricCanvas.width / 2, fabricCanvas.height / 2), zoom);
+                        setZoomLevel(zoom);
+                        fabricCanvas.requestRenderAll();
+                    }}
+                    title="Acercar"
+                >
+                    <ZoomIn className="h-4 w-4" />
+                </Button>
+            </div>
+
+            <Button 
+                variant="secondary" 
+                size="icon" 
+                className="h-10 w-10 shadow-sm"
+                onClick={() => {
+                    if (!fabricCanvas || !containerRef.current) return;
+                    fabricCanvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+                    setZoomLevel(1);
+                    fabricCanvas.requestRenderAll();
+                    toast.info("Vista restablecida");
+                }}
+                title="Ajustar a pantalla"
+            >
+                <Maximize className="h-4 w-4" />
+            </Button>
         </div>
       </div>
 
       <div className="flex flex-col gap-4">
         <SeatingGenerator onGenerate={handleGenerateSeating} />
-        <PropertiesPanel selectedObjects={selectedObjects} onUpdate={handleUpdateProperties} />
+        <PropertiesPanel selectedObjects={selectedObjects} onUpdate={handleUpdateProperties} onAlign={handleAlign} />
         <ZoneManager 
           zones={zones}
           onToggleVisibility={handleToggleZoneVisibility}

@@ -1,5 +1,6 @@
 import { 
-  MousePointer2, Pencil, Square, Circle, Trash2, Pentagon, Type, Hand, Save, Upload, Undo2, Redo2, Copy
+  MousePointer2, Pencil, Square, Circle, Trash2, Pentagon, Type, Hand, 
+  Save, Upload, Undo2, Redo2, Copy, Image, FileJson
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
@@ -14,12 +15,27 @@ interface ToolbarProps {
   onLoad: () => void;
   onUndo: () => void;
   onRedo: () => void;
-  onDuplicate: () => void; // Nueva función
+  onDuplicate: () => void;
+  onExportImage: () => void; // Nueva prop
+  onExportJSON: () => void;  // Nueva prop
   canUndo: boolean;
   canRedo: boolean;
 }
 
-export const Toolbar = ({ activeTool, onToolClick, onClear, onSave, onLoad, onUndo, onRedo, onDuplicate, canUndo, canRedo }: ToolbarProps) => {
+export const Toolbar = ({ 
+  activeTool, 
+  onToolClick, 
+  onClear, 
+  onSave, 
+  onLoad, 
+  onUndo, 
+  onRedo, 
+  onDuplicate,
+  onExportImage,
+  onExportJSON, 
+  canUndo, 
+  canRedo 
+}: ToolbarProps) => {
   const tools = [
     { id: "select" as const, icon: MousePointer2, label: "Seleccionar" },
     { id: "hand" as const, icon: Hand, label: "Mover (Pan)" },
@@ -76,14 +92,27 @@ export const Toolbar = ({ activeTool, onToolClick, onClear, onSave, onLoad, onUn
                 <span className="text-xs">Duplicar Selección</span>
             </Button>
             
+            {/* Guardado Local */}
             <div className="grid grid-cols-2 gap-2">
-              <Button variant="outline" size="sm" onClick={onSave} className="justify-start gap-2">
+              <Button variant="outline" size="sm" onClick={onSave} className="justify-start gap-2" title="Guardar en navegador">
                   <Save className="h-4 w-4" />
                   <span className="text-xs">Guardar</span>
               </Button>
-              <Button variant="outline" size="sm" onClick={onLoad} className="justify-start gap-2">
+              <Button variant="outline" size="sm" onClick={onLoad} className="justify-start gap-2" title="Cargar de navegador">
                   <Upload className="h-4 w-4" />
                   <span className="text-xs">Cargar</span>
+              </Button>
+            </div>
+
+            {/* Exportar */}
+            <div className="grid grid-cols-2 gap-2 mt-1">
+              <Button variant="outline" size="sm" onClick={onExportImage} className="justify-start gap-2" title="Descargar imagen">
+                  <Image className="h-4 w-4" />
+                  <span className="text-xs">Imagen</span>
+              </Button>
+              <Button variant="outline" size="sm" onClick={onExportJSON} className="justify-start gap-2" title="Descargar archivo">
+                  <FileJson className="h-4 w-4" />
+                  <span className="text-xs">JSON</span>
               </Button>
             </div>
             
